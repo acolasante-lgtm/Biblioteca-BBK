@@ -25,6 +25,8 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .bar{padding:14px 16px calc(14px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:10px;background:rgba(15,26,21,.92)}
 .msg{font-weight:600;text-align:center;min-height:1.4em}
 .msg.warn{color:var(--warn)}
+.msg.ok{color:var(--accent)}
+.top span.on{color:var(--accent);font-weight:600}
 .row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
 .btn{border:1px solid rgba(255,255,255,.25);background:transparent;color:var(--ink);padding:10px 14px;border-radius:var(--r);font:inherit;font-weight:600;cursor:pointer;text-decoration:none}
 .btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
@@ -58,6 +60,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
       <button class="btn" id="switchCam" type="button" hidden>Cambiar cámara</button>
       <button class="btn" id="torch" type="button" hidden>Linterna</button>
       <a class="btn" id="backApp" href="#">Volver a la aplicación</a>
+      <button class="btn" id="unpair" type="button" hidden>Desvincular</button>
     </div>
     <form class="manual" id="manual"><input id="manualCode" placeholder="O escribí el código" autocomplete="off"><button class="btn" type="submit">Buscar</button></form>
   </div>
@@ -71,10 +74,22 @@ const params = new URLSearchParams(location.search);
 const APP_POR_DEFECTO = 'https://script.google.com/a/macros/apdes.edu.ar/s/AKfycbxbx0sg7Y-YsZQvzxsSev_vdIqzM61hTnNiqfzpiGUR9OccRG_IXXuiupaU2ifsWW4CLQ/exec';
 let app = params.get('app') || APP_POR_DEFECTO || store.get('appUrl') || '';
 if(params.get('app')) store.set('appUrl', params.get('app'));
+// Entrada "Lector celular" de la aplicación (implementación con acceso para cualquier persona: solo recibe códigos)
+const LECTOR_API = '';
+let estacion = params.get('estacion') || store.get('estacion') || '';
+if(params.get('estacion')) store.set('estacion', params.get('estacion'));
 let stream = null, raf = 0, devices = [], devIdx = 0, done = false, detector = null;
+let ultimo = {c:'', t:0}, enviando = false;
 
-function msg(t, warn){ const m=$('#msg'); m.textContent=t; m.className='msg'+(warn?' warn':''); }
+function msg(t, warn){ const m=$('#msg'); m.textContent=t; m.className='msg'+(warn===true?' warn':warn==='ok'?' ok':''); }
+function modoLector(){ return !!(estacion && LECTOR_API); }
 function showApp(){
+  $('#unpair').hidden = !estacion;
+  $('#backApp').hidden = !!estacion;
+  if(estacion){
+    const h=$('#appHost'); h.textContent = LECTOR_API ? 'Vinculado a la notebook' : 'Falta configurar el lector'; h.className = LECTOR_API ? 'on' : '';
+    return;
+  }
   if(!app) return;
   try{ $('#appHost').textContent = new URL(app).hostname; }catch(e){}
   $('#backApp').href = app;
@@ -85,6 +100,34 @@ function extractCode(raw){
   if(m) return decodeURIComponent(m[1]).toUpperCase();
   if(/^https?:\/\//i.test(s)) return '';
   return s.toUpperCase();
+}
+function onRaw(raw){
+  const s = String(raw||'');
+  const m = s.match(/estacion=([A-Za-z0-9]{10,40})/);
+  if(m){ if(m[1]!==estacion){ estacion=m[1]; store.set('estacion', estacion); showApp(); msg('Celular vinculado con la notebook. Ya podés escanear libros.', 'ok'); if(navigator.vibrate) navigator.vibrate([60,40,60]); } return; }
+  const code = extractCode(s);
+  if(!code) return;
+  if(estacion){ enviar(code); } else go(code);
+}
+async function enviar(code){
+  if(!LECTOR_API){ msg('El lector todavía no está configurado. Avisale a quien administra la aplicación.', true); return; }
+  const ahora = Date.now();
+  if(enviando || (code===ultimo.c && ahora-ultimo.t < 4000)) return;
+  enviando = true; ultimo = {c:code, t:ahora};
+  $('#aim').classList.add('hit'); if(navigator.vibrate) navigator.vibrate(80);
+  msg('Enviando ' + code + '…');
+  const url = LECTOR_API + (LECTOR_API.includes('?')?'&':'?') + 'accion=escaneo&estacion=' + encodeURIComponent(estacion) + '&codigo=' + encodeURIComponent(code);
+  try{
+    const r = await fetch(url, {redirect:'follow'});
+    const j = await r.json();
+    if(j && j.ok) msg('✓ ' + code + ' enviado a la notebook', 'ok'); else msg('No se pudo enviar ' + code + '. Probá de nuevo.', true);
+  }catch(e){
+    try{ await fetch(url, {mode:'no-cors'}); msg('✓ ' + code + ' enviado a la notebook', 'ok'); }
+    catch(e2){ msg('Sin conexión: no se pudo enviar ' + code + '.', true); ultimo = {c:'', t:0}; }
+  }finally{
+    enviando = false;
+    setTimeout(()=>$('#aim').classList.remove('hit'), 600);
+  }
 }
 function go(code){
   if(done || !code) return;
@@ -116,7 +159,7 @@ async function start(){
     const caps = track.getCapabilities ? track.getCapabilities() : {};
     $('#torch').hidden = !caps.torch;
   }catch(e){}
-  msg('Apuntá la cámara al código QR del libro');
+  msg(estacion ? 'Apuntá al QR del libro: se envía a la notebook' : 'Apuntá la cámara al código QR del libro');
   if('BarcodeDetector' in window){ try{ detector = new BarcodeDetector({formats:['qr_code']}); }catch(e){ detector = null; } }
   scan();
 }
@@ -128,13 +171,13 @@ function scan(){
   if(v.readyState >= 2 && !busy){
     if(detector){
       busy = true;
-      detector.detect(v).then(r=>{ busy=false; if(r && r[0]) go(extractCode(r[0].rawValue)); }).catch(()=>{ busy=false; detector=null; });
+      detector.detect(v).then(r=>{ busy=false; if(r && r[0]) onRaw(r[0].rawValue); }).catch(()=>{ busy=false; detector=null; });
     } else if(window.jsQR){
       const sc = Math.min(1, 720/Math.max(v.videoWidth, v.videoHeight));
       cv.width = Math.round(v.videoWidth*sc); cv.height = Math.round(v.videoHeight*sc);
       cx.drawImage(v, 0, 0, cv.width, cv.height);
       const r = jsQR(cx.getImageData(0,0,cv.width,cv.height).data, cv.width, cv.height, {inversionAttempts:'dontInvert'});
-      if(r && r.data) go(extractCode(r.data));
+      if(r && r.data) onRaw(r.data);
     }
   }
   raf = requestAnimationFrame(scan);
@@ -144,7 +187,8 @@ let torchOn = false;
 $('#torch').addEventListener('click', async ()=>{
   try{ torchOn = !torchOn; await stream.getVideoTracks()[0].applyConstraints({advanced:[{torch:torchOn}]}); }catch(e){ $('#torch').hidden = true; }
 });
-$('#manual').addEventListener('submit', e=>{ e.preventDefault(); go(extractCode($('#manualCode').value)); });
+$('#manual').addEventListener('submit', e=>{ e.preventDefault(); onRaw($('#manualCode').value); $('#manualCode').value=''; });
+$('#unpair').addEventListener('click', ()=>{ estacion=''; try{ localStorage.removeItem('estacion'); }catch(e){} showApp(); msg('Celular desvinculado. Los libros escaneados se abren en este celular.'); });
 $('#setupForm').addEventListener('submit', e=>{
   e.preventDefault();
   const u = $('#appUrl').value.trim();
@@ -155,7 +199,7 @@ function alertBox(t){ msg(t, true); }
 document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && !stream && app && !done) start(); else if(document.visibilityState==='hidden') stop(); });
 window.addEventListener('pageshow', e=>{ if(e.persisted && app){ done=false; start(); } });
 
-if(!app){ $('#setup').hidden = false; msg('Falta configurar el link de la aplicación', true); }
+if(!app && !estacion){ $('#setup').hidden = false; msg('Falta configurar el link de la aplicación', true); }
 else { showApp(); start(); }
 })();
 </script>
