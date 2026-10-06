@@ -75,7 +75,7 @@ const APP_POR_DEFECTO = 'https://script.google.com/a/macros/apdes.edu.ar/s/AKfyc
 let app = params.get('app') || APP_POR_DEFECTO || store.get('appUrl') || '';
 if(params.get('app')) store.set('appUrl', params.get('app'));
 // Entrada "Lector celular" de la aplicación (implementación con acceso para cualquier persona: solo recibe códigos)
-const LECTOR_API = '';
+const LECTOR_API = 'https://script.google.com/macros/s/AKfycbxdZPG32IOaUyKnx_TuJCQVZ0xUDM-FXAyQLqMzkQXtnJN_KpWTElyZBSFqhaIoFzxbzw/exec';
 let estacion = params.get('estacion') || store.get('estacion') || '';
 if(params.get('estacion')) store.set('estacion', params.get('estacion'));
 let stream = null, raf = 0, devices = [], devIdx = 0, done = false, detector = null;
@@ -122,8 +122,9 @@ async function enviar(code){
     const j = await r.json();
     if(j && j.ok) msg('✓ ' + code + ' enviado a la notebook', 'ok'); else msg('No se pudo enviar ' + code + '. Probá de nuevo.', true);
   }catch(e){
-    try{ await fetch(url, {mode:'no-cors'}); msg('✓ ' + code + ' enviado a la notebook', 'ok'); }
-    catch(e2){ msg('Sin conexión: no se pudo enviar ' + code + '.', true); ultimo = {c:'', t:0}; }
+    ultimo = {c:'', t:0};
+    msg(navigator.onLine === false ? 'Sin conexión a internet: no se pudo enviar ' + code + '.'
+      : 'No se pudo enviar ' + code + ': la entrada “Lector celular” de la aplicación no está abierta a “Cualquier persona”.', true);
   }finally{
     enviando = false;
     setTimeout(()=>$('#aim').classList.remove('hit'), 600);
