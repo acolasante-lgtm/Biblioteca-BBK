@@ -96,7 +96,7 @@ function showApp(){
 }
 function extractCode(raw){
   let s = String(raw||'').trim();
-  const m = s.match(/codigo[^A-Za-z0-9]*([A-Za-z0-9_.\-]+)\s*$/i);
+  const m = s.match(/codigo[^A-Za-z0-9]*([A-Za-z0-9_.\-]+)\s*$/i) || s.match(/(?:^|[^A-Za-z0-9])c[^A-Za-z0-9]{1,2}([A-Za-z0-9_.\-]+)\s*$/);
   if(m) return decodeURIComponent(m[1]).toUpperCase();
   if(/^https?:\/\//i.test(s)) return '';
   return s.toUpperCase();
@@ -110,7 +110,7 @@ function onRaw(raw){
   if(estacion){ enviar(code); } else go(code);
 }
 async function enviar(code){
-  if(!LECTOR_API){ msg('El lector todavía no está configurado. Avisale a quien administra la aplicación.', true); return; }
+  if(!LECTOR_API){ if(code!==ultimo.c){ ultimo={c:code,t:Date.now()}; if(navigator.vibrate) navigator.vibrate(80); } msg('Leí el código ' + code + ', pero falta configurar el envío a la notebook (link del “Lector celular”).', true); return; }
   const ahora = Date.now();
   if(enviando || (code===ultimo.c && ahora-ultimo.t < 4000)) return;
   enviando = true; ultimo = {c:code, t:ahora};
@@ -144,7 +144,7 @@ async function start(){
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ msg('Este navegador no permite usar la cámara. Probá con Chrome o Safari actualizados.', true); return; }
   const constraints = devices.length ? {deviceId:{exact:devices[devIdx].deviceId}} : {facingMode:{ideal:'environment'}};
   try{
-    stream = await navigator.mediaDevices.getUserMedia({video:Object.assign({width:{ideal:1280},height:{ideal:720}}, constraints), audio:false});
+    stream = await navigator.mediaDevices.getUserMedia({video:Object.assign({width:{ideal:1920},height:{ideal:1080}}, constraints), audio:false});
   }catch(e){
     msg(e && e.name==='NotAllowedError' ? 'No hay permiso para usar la cámara. Habilitalo en la configuración del navegador para este sitio y recargá la página.'
       : e && e.name==='NotFoundError' ? 'No se encontró ninguna cámara en este equipo.'
@@ -158,27 +158,41 @@ async function start(){
     const track = stream.getVideoTracks()[0];
     const caps = track.getCapabilities ? track.getCapabilities() : {};
     $('#torch').hidden = !caps.torch;
+    if(caps.focusMode && caps.focusMode.includes('continuous')) track.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{});
   }catch(e){}
   msg(estacion ? 'Apuntá al QR del libro: se envía a la notebook' : 'Apuntá la cámara al código QR del libro');
-  if('BarcodeDetector' in window){ try{ detector = new BarcodeDetector({formats:['qr_code']}); }catch(e){ detector = null; } }
+  detector = null;
+  if('BarcodeDetector' in window){
+    try{ const f = BarcodeDetector.getSupportedFormats ? await BarcodeDetector.getSupportedFormats() : ['qr_code']; if(f.includes('qr_code')) detector = new BarcodeDetector({formats:['qr_code']}); }catch(e){ detector = null; }
+  }
   scan();
 }
 const cv = document.createElement('canvas'); const cx = cv.getContext('2d', {willReadFrequently:true});
-let busy = false;
+let busy = false, frame = 0;
+/* Dos lectores en paralelo: el del navegador (si existe) y jsQR sobre el centro de la imagen a resolución completa
+   y, cada tanto, sobre la imagen entera. Así lee etiquetas chicas o algo lejanas. */
+function leerJsQR(v){
+  if(!window.jsQR) return;
+  const vw = v.videoWidth, vh = v.videoHeight; if(!vw || !vh) return;
+  let sx, sy, sw, sh;
+  if(frame % 3 === 2){ sx = 0; sy = 0; sw = vw; sh = vh; }
+  else { const lado = Math.round(Math.min(vw, vh) * (frame % 3 === 0 ? 0.6 : 0.85)); sx = Math.round((vw-lado)/2); sy = Math.round((vh-lado)/2); sw = sh = lado; }
+  const sc = Math.min(1, 900/Math.max(sw, sh));
+  cv.width = Math.round(sw*sc); cv.height = Math.round(sh*sc);
+  cx.drawImage(v, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
+  const r = jsQR(cx.getImageData(0,0,cv.width,cv.height).data, cv.width, cv.height, {inversionAttempts: frame % 6 === 5 ? 'attemptBoth' : 'dontInvert'});
+  if(r && r.data) onRaw(r.data);
+}
 function scan(){
   if(!stream || done) return;
   const v = $('#video');
-  if(v.readyState >= 2 && !busy){
-    if(detector){
+  if(v.readyState >= 2){
+    frame++;
+    if(detector && !busy){
       busy = true;
-      detector.detect(v).then(r=>{ busy=false; if(r && r[0]) onRaw(r[0].rawValue); }).catch(()=>{ busy=false; detector=null; });
-    } else if(window.jsQR){
-      const sc = Math.min(1, 720/Math.max(v.videoWidth, v.videoHeight));
-      cv.width = Math.round(v.videoWidth*sc); cv.height = Math.round(v.videoHeight*sc);
-      cx.drawImage(v, 0, 0, cv.width, cv.height);
-      const r = jsQR(cx.getImageData(0,0,cv.width,cv.height).data, cv.width, cv.height, {inversionAttempts:'dontInvert'});
-      if(r && r.data) onRaw(r.data);
+      detector.detect(v).then(r=>{ busy=false; if(r && r[0] && r[0].rawValue) onRaw(r[0].rawValue); }).catch(()=>{ busy=false; detector=null; });
     }
+    if(frame % 2 === 0 || !detector) leerJsQR(v);
   }
   raf = requestAnimationFrame(scan);
 }
@@ -199,7 +213,14 @@ function alertBox(t){ msg(t, true); }
 document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && !stream && app && !done) start(); else if(document.visibilityState==='hidden') stop(); });
 window.addEventListener('pageshow', e=>{ if(e.persisted && app){ done=false; start(); } });
 
-if(!app && !estacion){ $('#setup').hidden = false; msg('Falta configurar el link de la aplicación', true); }
+const codigoLink = params.get('c');
+if(codigoLink){
+  try{ history.replaceState(null, '', location.pathname); }catch(e){}
+  if(estacion){ setTimeout(()=>enviar(codigoLink.toUpperCase()), 50); }
+  else if(app){ go(codigoLink.toUpperCase()); }
+}
+if(codigoLink && !estacion && app){ /* redirigiendo a la aplicación */ }
+else if(!app && !estacion){ $('#setup').hidden = false; msg('Falta configurar el link de la aplicación', true); }
 else { showApp(); start(); }
 })();
 </script>
